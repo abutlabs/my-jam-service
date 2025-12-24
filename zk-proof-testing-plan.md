@@ -2,163 +2,300 @@
 
 ## Overview
 
-This document outlines the plan to evolve `my-jam-service` from a minimal demo into a functional ZK proof verification service running on JAM.
+This document tracks the evolution of `my-jam-service` from a minimal demo into a functional ZK proof verification service running on JAM (Join-Accumulate Machine).
+
+**Current Status:** Phase 2 Complete - Hash verification working end-to-end with web dashboard.
+
+---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         CLIENT (TypeScript)                              │
-│  client/                                                                 │
-│  ├── submit-proof.ts    - Submit ZK proofs to the service               │
-│  ├── query-state.ts     - Query verification results                    │
-│  └── generate-proof.ts  - Generate test proofs (for development)        │
-└─────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼ WebSocket RPC (ws://localhost:19800)
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         JAM NETWORK (PolkaJam)                           │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │  my-jam-service (Service ID: 0x...)                             │    │
-│  │                                                                  │    │
-│  │  refine():                                                       │    │
-│  │    - Deserialize proof from WorkPayload                         │    │
-│  │    - Verify ZK proof using no_std verifier                      │    │
-│  │    - Return verification result as WorkOutput                   │    │
-│  │                                                                  │    │
-│  │  accumulate():                                                   │    │
-│  │    - Store verification result in service state                 │    │
-│  │    - Emit events / update counters                              │    │
-│  └─────────────────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              WEB DASHBOARD                                   │
+│  client/web/                 (Next.js 14 + shadcn/ui)                       │
+│  ├── /              Dashboard with network status & pipeline visualization  │
+│  ├── /verify        Interactive hash verification with tamper testing       │
+│  ├── /explorer      Slot browser & verification history                     │
+│  └── /learn         Educational content about JAM & ZK proofs               │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                     │
+                                     ▼ Server Actions (calls jamt CLI)
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         CLI CLIENT (TypeScript)                              │
+│  client/src/                                                                 │
+│  ├── hash-verify.ts    Submit hash verifications (with --tamper flag)       │
+│  ├── query-state.ts    Query service storage                                │
+│  ├── monitor.ts        Watch network activity                               │
+│  └── submit-proof.ts   (Future) Submit ZK proofs                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                     │
+                                     ▼ jamt CLI (WebSocket RPC to localhost:9944)
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         JAM NETWORK (PolkaJam Testnet)                       │
+│  6 validators running locally via `polkajam-testnet`                        │
+│                                                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  my-jam-service (Service ID: 99fbfec5)                              │    │
+│  │                                                                      │    │
+│  │  REFINE (off-chain, 6s limit, runs on validator cores):             │    │
+│  │    1. Extract expected_hash (bytes 0-31) and preimage (bytes 32+)   │    │
+│  │    2. Compute blake2s256(preimage)                                  │    │
+│  │    3. Compare: computed_hash == expected_hash                       │    │
+│  │    4. Return: [result_code] + [computed_hash]                       │    │
+│  │                                                                      │    │
+│  │  ACCUMULATE (on-chain, <10ms, runs on all validators):              │    │
+│  │    1. Increment verification count                                  │    │
+│  │    2. Update status storage                                         │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Phase 1: Project Cleanup & Client Setup
+## Phase 1: Project Cleanup & Client Setup ✅ COMPLETE
 
 **Goal:** Clean up legacy code and establish the TypeScript client infrastructure.
 
-### Tasks
+### Completed Tasks
 
-- [ ] **1.1** Delete `deploy.ts` (superseded by `jamt create-service`)
-- [ ] **1.2** Create `client/` directory structure:
+- [x] **1.1** Deleted `deploy.ts` (superseded by `jamt create-service`)
+- [x] **1.2** Created `client/` directory structure:
   ```
   client/
   ├── package.json
   ├── tsconfig.json
   ├── src/
   │   ├── config.ts          # RPC endpoints, service ID config
-  │   ├── submit-proof.ts    # Submit ZK proofs as work items
+  │   ├── hash-verify.ts     # Submit hash verifications
+  │   ├── submit-proof.ts    # (Placeholder for ZK proofs)
   │   ├── query-state.ts     # Query service storage
-  │   ├── monitor.ts         # Monitor work package lifecycle
+  │   ├── monitor.ts         # Monitor network activity
   │   └── utils/
-  │       ├── rpc.ts         # WebSocket RPC client wrapper
+  │       ├── rpc.ts         # jamt CLI wrapper
   │       └── encoding.ts    # Hex/binary encoding helpers
   └── README.md
   ```
-- [ ] **1.3** Set up client dependencies:
-  - `ws` or `@polkadot/api` for WebSocket RPC
-  - `commander` for CLI interface
-  - TypeScript tooling
+- [x] **1.3** Set up client dependencies (TypeScript, tsx runner)
+- [x] **1.4** Updated `.gitignore` for proper project structure
+- [x] **1.5** Updated `README.md` with deployment guide
 
-### Deliverables
-- Clean project structure
-- Working RPC client that can query `jamt inspect` equivalent data
+### Key Learnings
 
----
-
-## Phase 2: Simple Proof-of-Concept (Hash Verification)
-
-**Goal:** Establish the end-to-end flow before introducing real ZK proofs.
-
-### Tasks
-
-- [ ] **2.1** Update `src/lib.rs` to implement hash verification:
-  ```rust
-  // refine(): Verify that hash(preimage) == expected_hash
-  // Input payload: [32 bytes expected_hash] + [N bytes preimage]
-  // Output: 1 byte (0x01 = valid, 0x00 = invalid)
-  ```
-- [ ] **2.2** Update `accumulate()` to store results:
-  ```rust
-  // Store: verification_count, last_result, last_hash
-  ```
-- [ ] **2.3** Implement `client/src/submit-proof.ts`:
-  ```typescript
-  // CLI: npx ts-node submit-proof.ts --preimage "hello" --hash 0x...
-  ```
-- [ ] **2.4** Implement `client/src/query-state.ts`:
-  ```typescript
-  // CLI: npx ts-node query-state.ts --key verification_count
-  ```
-- [ ] **2.5** End-to-end test:
-  1. Start testnet
-  2. Deploy updated service
-  3. Submit hash verification request via client
-  4. Query result via client
-
-### Deliverables
-- Working hash verification service
-- Client can submit and query
-- Documented test procedure
+- `jamt` CLI requires 6-validator testnet (`polkajam-testnet`), not single dev node
+- Service IDs are 8 hex chars without `0x` prefix for jamt commands
+- `--chain dev` flag must come BEFORE the subcommand: `polkajam --chain dev run`
 
 ---
 
-## Phase 3: ZK Proof Integration (RISC Zero or SP1)
+## Phase 2: Hash Verification Proof-of-Concept ✅ COMPLETE
 
-**Goal:** Integrate a real ZK proving system.
+**Goal:** Establish the end-to-end refine→accumulate flow before introducing real ZK proofs.
 
-### Option A: RISC Zero (Recommended for JAM)
-- Mature `no_std` verifier support
-- Active development for RISC-V targets
-- Good documentation
+### Completed Tasks
 
-### Option B: SP1 (Succinct)
-- Rust-native
-- Growing ecosystem
-
-### Tasks
-
-- [ ] **3.1** Research ZK verifier compatibility:
-  - Must compile to `no_std` + `riscv64` target
-  - Must fit within JAM's 6-second refine limit
-  - Evaluate proof size constraints
-
-- [ ] **3.2** Add ZK verifier dependency to `Cargo.toml`:
-  ```toml
-  [dependencies]
-  risc0-zkvm = { version = "x.x", default-features = false, features = ["verify"] }
-  # OR
-  sp1-verifier = { version = "x.x", default-features = false }
-  ```
-
-- [ ] **3.3** Update `src/lib.rs` for ZK verification:
+- [x] **2.1** Updated `src/lib.rs` with Blake2s-256 hash verification:
   ```rust
-  fn refine(..., payload: WorkPayload, ...) -> WorkOutput {
-      let proof_data = payload.take();
-      // Deserialize proof
-      // Verify against expected program hash
-      // Return result
+  // Payload format: [32 bytes expected_hash] + [N bytes preimage]
+  // Result codes: 0x01 = valid, 0x00 = invalid, 0xE1 = payload too short
+
+  fn refine(payload: WorkPayload) -> WorkOutput {
+      let expected_hash = &payload[..32];
+      let preimage = &payload[32..];
+      let computed = blake2s256(preimage);
+      let is_valid = computed == expected_hash;
+      return [result_code, computed_hash...];
   }
   ```
 
-- [ ] **3.4** Create proof generation tooling:
-  - `client/src/generate-proof.ts` - Generate test proofs off-chain
-  - Or separate `prover/` Rust crate for proof generation
+- [x] **2.2** Updated `accumulate()` to store results:
+  ```rust
+  fn accumulate(item_count: usize) -> Option<Hash> {
+      let count = get_storage(b"count") + item_count;
+      set_storage(b"count", count);
+      set_storage(b"status", b"accumulated");
+      None
+  }
+  ```
 
-- [ ] **3.5** Update client to handle ZK proof format:
-  - Serialize proofs correctly
-  - Handle larger payload sizes
+- [x] **2.3** Implemented `client/src/hash-verify.ts`:
+  ```bash
+  # Submit valid verification
+  npx tsx src/hash-verify.ts "hello world"
+
+  # Submit tampered verification (intentionally fails)
+  npx tsx src/hash-verify.ts "hello world" --tamper
+  ```
+
+- [x] **2.4** Implemented `client/src/query-state.ts`:
+  ```bash
+  npx tsx src/query-state.ts count
+  npx tsx src/query-state.ts status
+  ```
+
+- [x] **2.5** Deployed and tested end-to-end:
+  1. Started testnet: `./polkajam-nightly/polkajam-testnet`
+  2. Deployed service: `./polkajam-nightly/jamt create-service my-jam-service.jam`
+  3. Submitted verifications via CLI
+  4. Observed pipeline in `jamtop`
 
 ### Deliverables
-- JAM service that verifies real ZK proofs
-- Client tooling for proof submission
-- Example proof generation workflow
+
+- ✅ Working hash verification service (ID: `99fbfec5`)
+- ✅ CLI client for submission and queries
+- ✅ Tamper flag for testing failure paths
 
 ---
 
-## Phase 4: Production Hardening
+## Phase 2.5: Web Dashboard ✅ COMPLETE (Bonus)
+
+**Goal:** Create a visual interface for demonstration and education.
+
+### Completed Tasks
+
+- [x] **2.5.1** Set up Next.js 14 with App Router
+- [x] **2.5.2** Integrated shadcn/ui components (dark theme)
+- [x] **2.5.3** Created server actions wrapping jamt CLI (`src/app/actions/jam.ts`)
+- [x] **2.5.4** Built four pages:
+
+| Route | Purpose |
+|-------|---------|
+| `/` | Dashboard with network status, service info, JAM pipeline visualization |
+| `/verify` | Interactive hash verification form with tamper checkbox |
+| `/explorer` | Slot browser, clickable blocks with verification badges, full history |
+| `/learn` | Educational content explaining JAM, Refine/Accumulate, ZK proofs |
+
+- [x] **2.5.5** Implemented local verification history:
+  - Stores submissions in localStorage
+  - Expandable cards showing payload breakdown
+  - Educational display: "bytes 0-31 = expected hash, bytes 32+ = preimage"
+  - Stats: total/valid/invalid/pending counts
+
+- [x] **2.5.6** Added pipeline visualization component showing:
+  Submit → Refine → Audit → Accumulate flow with animated progress
+
+### Key Features
+
+```
+client/web/
+├── src/app/
+│   ├── page.tsx              # Dashboard
+│   ├── verify/page.tsx       # Hash verification form
+│   ├── explorer/page.tsx     # Block explorer + history
+│   ├── learn/page.tsx        # Educational content
+│   ├── actions/jam.ts        # Server actions (jamt wrapper)
+│   └── api/network/route.ts  # Network status API
+├── src/components/
+│   ├── Pipeline.tsx          # Visual pipeline stages
+│   ├── VerificationHistory.tsx # Expandable submission cards
+│   └── layout/Header.tsx     # Navigation
+└── src/lib/
+    └── history.ts            # localStorage history store
+```
+
+### Running the Dashboard
+
+```bash
+cd client/web
+npm install
+npm run dev
+# Open http://localhost:3000
+```
+
+---
+
+## Phase 3: ZK Proof Integration 🔄 NEXT
+
+**Goal:** Replace hash verification with real ZK proof verification.
+
+### Research Required
+
+- [ ] **3.1** Evaluate ZK verifier compatibility with JAM:
+  - Must compile to `no_std` + PolkaVM (RISC-V 64-bit)
+  - Must complete verification within 6-second refine limit
+  - Must have deterministic execution across validators
+
+### Option A: RISC Zero (Recommended)
+
+```toml
+[dependencies]
+risc0-zkvm = { version = "1.0", default-features = false, features = ["verify"] }
+```
+
+**Pros:**
+- Mature `no_std` verifier
+- Active RISC-V development
+- Good documentation
+- ~100ms verification time
+
+**Cons:**
+- Larger proof sizes (~200KB)
+- Heavier dependencies
+
+### Option B: SP1 (Succinct)
+
+```toml
+[dependencies]
+sp1-verifier = { version = "x.x", default-features = false }
+```
+
+**Pros:**
+- Smaller proofs (~50KB)
+- Faster verification (~50ms)
+- Rust-native
+
+**Cons:**
+- Newer, less battle-tested
+- Partial `no_std` support
+
+### Option C: Groth16/SNARK Verifier
+
+```toml
+[dependencies]
+ark-groth16 = { version = "0.4", default-features = false }
+ark-bn254 = { version = "0.4", default-features = false }
+```
+
+**Pros:**
+- Tiny proofs (~200 bytes)
+- Very fast verification (~10ms)
+- Well-understood cryptography
+
+**Cons:**
+- Requires trusted setup
+- More complex circuit development
+
+### Tasks
+
+- [ ] **3.2** Create test ZK circuit (e.g., "I know x such that hash(x) = y")
+- [ ] **3.3** Add ZK verifier to `Cargo.toml` with `no_std` features
+- [ ] **3.4** Update `src/lib.rs` for ZK proof verification:
+  ```rust
+  fn refine(payload: WorkPayload) -> WorkOutput {
+      let proof_bytes = payload.take();
+      let proof = deserialize_proof(&proof_bytes)?;
+      let public_inputs = extract_public_inputs(&proof);
+      let is_valid = verify_proof(&proof, &public_inputs)?;
+      // Return verification result
+  }
+  ```
+- [ ] **3.5** Create proof generation tooling:
+  - Off-chain prover in separate crate or TypeScript
+  - Test vectors for verification
+- [ ] **3.6** Update web dashboard for ZK proof submission:
+  - File upload for proof data
+  - Display public inputs
+  - Show verification gas/time
+
+### Deliverables
+
+- [ ] JAM service verifying real ZK proofs
+- [ ] Proof generation tooling
+- [ ] Updated dashboard with ZK-specific UI
+
+---
+
+## Phase 4: Production Hardening 📋 PLANNED
 
 **Goal:** Make the service robust and production-ready.
 
@@ -166,117 +303,203 @@ This document outlines the plan to evolve `my-jam-service` from a minimal demo i
 
 - [ ] **4.1** Error handling:
   - Graceful handling of malformed proofs
-  - Clear error codes in WorkOutput
+  - Detailed error codes in WorkOutput
+  - Client-side error parsing
 
-- [ ] **4.2** Gas optimization:
+- [ ] **4.2** Performance optimization:
   - Profile refine() gas usage
   - Optimize verification hot paths
+  - Benchmark against 6-second limit
 
 - [ ] **4.3** State management:
-  - Efficient storage schema
-  - Proof registry / history
+  - Efficient storage schema (avoid unbounded growth)
+  - Proof registry with expiration
+  - Query historical verifications
 
-- [ ] **4.4** Client improvements:
-  - Retry logic for failed submissions
-  - Transaction monitoring
-  - Web UI (optional)
+- [ ] **4.4** Monitoring & observability:
+  - Verification success/failure metrics
+  - Gas usage tracking
+  - Alert on anomalies
 
-- [ ] **4.5** Documentation:
-  - API documentation
-  - Integration guide
-  - Example applications
+- [ ] **4.5** Security audit:
+  - Review proof deserialization for panics
+  - Ensure deterministic behavior
+  - Fuzz testing with malformed inputs
 
 ### Deliverables
-- Production-ready ZK verification service
-- Comprehensive documentation
-- Example integrations
+
+- [ ] Production-ready ZK verification service
+- [ ] Comprehensive test suite
+- [ ] Security documentation
 
 ---
 
-## Phase 5: Advanced Features (Future)
+## Phase 5: Advanced Features 🔮 FUTURE
 
-- [ ] **5.1** Batch proof verification
-- [ ] **5.2** Proof aggregation
-- [ ] **5.3** Cross-service communication
-- [ ] **5.4** Token-gated verification (require payment)
-- [ ] **5.5** Verification receipts / attestations
+- [ ] **5.1** Batch proof verification (multiple proofs per work item)
+- [ ] **5.2** Proof aggregation (combine multiple proofs into one)
+- [ ] **5.3** Cross-service communication (verify proofs for other services)
+- [ ] **5.4** Token-gated verification (require payment/stake)
+- [ ] **5.5** Verification receipts (on-chain attestation of valid proof)
+- [ ] **5.6** Recursive proofs (proofs that verify other proofs)
 
 ---
 
-## Technical Considerations
+## Technical Reference
 
 ### JAM Constraints
 
 | Constraint | Limit | Implication |
 |------------|-------|-------------|
 | Refine time | ~6 seconds | ZK verification must complete within this |
-| Refine memory | TBD | Proof size and verifier memory usage |
-| Accumulate time | <10ms | State updates must be fast |
-| Work payload size | TBD | May limit proof size |
-
-### ZK Verifier Requirements
-
-- **Must support `no_std`** - JAM runs without standard library
-- **Must compile to RISC-V** - PolkaVM target architecture
-- **Deterministic execution** - Same proof must verify identically across validators
+| Refine memory | ~2GB | Limits proof size and verifier memory |
+| Accumulate time | <10ms | State updates must be fast, no heavy computation |
+| Work payload size | ~5MB | May limit proof size for larger proof systems |
+| Storage per key | ~4KB | Efficient encoding required |
 
 ### Proof Systems Comparison
 
-| System | no_std Support | Proof Size | Verification Time | Notes |
-|--------|---------------|------------|-------------------|-------|
-| RISC Zero | Yes | ~200KB | ~100ms | Best JAM compatibility |
-| SP1 | Partial | ~50KB | ~50ms | Newer, less tested |
-| Groth16 | Yes | ~200B | ~10ms | Requires trusted setup |
-| Plonk | Yes | ~500B | ~20ms | Universal setup |
+| System | no_std | Proof Size | Verify Time | Trusted Setup | Best For |
+|--------|--------|------------|-------------|---------------|----------|
+| RISC Zero | ✅ | ~200KB | ~100ms | No | General computation |
+| SP1 | Partial | ~50KB | ~50ms | No | General computation |
+| Groth16 | ✅ | ~200B | ~10ms | Yes | Known circuits |
+| Plonk | ✅ | ~500B | ~20ms | Universal | Known circuits |
+| STARKs | ✅ | ~50KB | ~50ms | No | Large computations |
+
+### Payload Format (Current: Hash Verification)
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                      Work Payload                             │
+├───────────────────────────────┬──────────────────────────────┤
+│     Expected Hash (32 bytes)  │      Preimage (N bytes)      │
+│        bytes 0-31             │         bytes 32+            │
+└───────────────────────────────┴──────────────────────────────┘
+
+Example: "hello" → payload = 0x19213b... (32 bytes) + 0x68656c6c6f (5 bytes)
+```
+
+### Payload Format (Future: ZK Proof)
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                      Work Payload                             │
+├────────────────┬─────────────────────┬───────────────────────┤
+│  Version (1B)  │  Public Inputs (N)  │    Proof Data (M)     │
+└────────────────┴─────────────────────┴───────────────────────┘
+```
+
+### Result Codes
+
+| Code | Meaning |
+|------|---------|
+| `0x01` | Valid - verification passed |
+| `0x00` | Invalid - verification failed |
+| `0xE1` | Error - payload too short |
+| `0xE2` | Error - malformed proof (future) |
+| `0xE3` | Error - unsupported proof type (future) |
 
 ---
 
-## File Structure (Final)
+## Current File Structure
 
 ```
 my-jam-service/
-├── Cargo.toml              # Rust service dependencies
+├── Cargo.toml                    # Rust dependencies (blake2)
+├── Cargo.lock
 ├── src/
-│   └── lib.rs              # ZK verification service logic
-├── client/                 # TypeScript client tooling
+│   └── lib.rs                    # JAM service: refine + accumulate
+├── my-jam-service.jam            # Compiled PolkaVM blob
+│
+├── client/                       # CLI tooling
 │   ├── package.json
 │   ├── tsconfig.json
 │   ├── src/
 │   │   ├── config.ts
-│   │   ├── submit-proof.ts
-│   │   ├── query-state.ts
-│   │   ├── generate-proof.ts
-│   │   ├── monitor.ts
+│   │   ├── hash-verify.ts        # Submit hash verifications
+│   │   ├── submit-proof.ts       # (Future) Submit ZK proofs
+│   │   ├── query-state.ts        # Query service storage
+│   │   ├── monitor.ts            # Watch network activity
 │   │   └── utils/
 │   │       ├── rpc.ts
 │   │       └── encoding.ts
 │   └── README.md
-├── prover/                 # (Optional) Off-chain proof generation
-│   ├── Cargo.toml
-│   └── src/
-│       └── main.rs
-├── polkajam-nightly/       # PolkaJam binaries (gitignored)
-├── my-jam-service.jam      # Compiled service blob
-├── README.md               # Project documentation
-├── zk-proof-testing-plan.md # This plan
+│
+├── client/web/                   # Web dashboard
+│   ├── package.json
+│   ├── next.config.ts
+│   ├── src/
+│   │   ├── app/
+│   │   │   ├── page.tsx          # Dashboard
+│   │   │   ├── verify/page.tsx   # Hash verification
+│   │   │   ├── explorer/page.tsx # Block explorer
+│   │   │   ├── learn/page.tsx    # Educational content
+│   │   │   ├── actions/jam.ts    # Server actions
+│   │   │   └── api/network/      # API routes
+│   │   ├── components/
+│   │   │   ├── Pipeline.tsx
+│   │   │   ├── VerificationHistory.tsx
+│   │   │   └── ui/               # shadcn components
+│   │   └── lib/
+│   │       ├── history.ts        # localStorage store
+│   │       └── utils.ts
+│   └── README.md
+│
+├── polkajam-nightly/             # PolkaJam binaries (gitignored)
+│   ├── polkajam                  # Single-node runner
+│   ├── polkajam-testnet          # 6-validator testnet
+│   ├── jamt                      # CLI tool
+│   └── jamtop                    # TUI monitor
+│
+├── README.md                     # Project documentation
+├── zk-proof-testing-plan.md      # This file
 └── .gitignore
 ```
 
 ---
 
-## Next Steps
+## Quick Commands Reference
 
-1. **Immediate:** Complete Phase 1 (cleanup + client setup)
-2. **This week:** Complete Phase 2 (hash verification PoC)
-3. **Next:** Evaluate RISC Zero vs SP1 for Phase 3
-4. **Milestone:** First successful ZK proof verification on local JAM testnet
+```bash
+# Start 6-validator testnet
+./polkajam-nightly/polkajam-testnet
+
+# Monitor network (separate terminal)
+./polkajam-nightly/jamtop
+
+# Deploy/update service
+./polkajam-nightly/jamt create-service my-jam-service.jam
+
+# Submit hash verification (CLI)
+cd client && npx tsx src/hash-verify.ts "your message"
+cd client && npx tsx src/hash-verify.ts "your message" --tamper
+
+# Query storage
+cd client && npx tsx src/query-state.ts count
+
+# Run web dashboard
+cd client/web && npm run dev
+```
 
 ---
 
 ## Resources
 
 - [JAM Graypaper](https://graypaper.com) - JAM specification
+- [Polkadot Wiki - JAM](https://wiki.polkadot.network/docs/learn-jam-chain) - Overview
 - [RISC Zero Docs](https://dev.risczero.com) - ZK proving system
 - [SP1 Docs](https://docs.succinct.xyz) - Alternative ZK system
 - [jam-pvm-common](https://docs.rs/jam-pvm-common) - JAM Rust SDK
-- [PolkaJam Releases](https://github.com/parity-tech/polkajam/releases) - Node binaries
+- [blake2 crate](https://docs.rs/blake2) - Hash function used
+
+---
+
+## Changelog
+
+| Date | Phase | Summary |
+|------|-------|---------|
+| 2024-12-24 | 1 | Project cleanup, CLI client setup |
+| 2024-12-24 | 2 | Blake2s hash verification implemented |
+| 2024-12-24 | 2.5 | Web dashboard with history tracking |
+| TBD | 3 | ZK proof integration |
